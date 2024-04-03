@@ -15,9 +15,10 @@ import { loadCustomOpenMRSForm } from "src/app/store/actions";
 import { AppState } from "src/app/store/reducers";
 import { getCurrentLocation } from "src/app/store/selectors";
 import { getCustomOpenMRSFormById } from "src/app/store/selectors/form.selectors";
-import { sum, keyBy } from "lodash";
+import { sum, keyBy, flatten } from "lodash";
 import { MatDialog } from "@angular/material/dialog";
 import { PosConfirmSalesModalComponent } from "../../modals/pos-confirm-sales-modal/pos-confirm-sales-modal.component";
+import { OrdersService } from "src/app/shared/resources/order/services/orders.service";
 
 @Component({
   selector: "app-cashier-dashboard",
@@ -59,7 +60,8 @@ export class CashierDashboardComponent implements OnInit {
     private visitService: VisitsService,
     private observationService: ObservationService,
     private itemPricesService: ItemPriceService,
-    private dialog: MatDialog
+    private dialog: MatDialog,
+    private ordersService: OrdersService
   ) {}
 
   ngOnInit(): void {
@@ -288,7 +290,9 @@ export class CashierDashboardComponent implements OnInit {
             .saveEncounterWithObsDetails(encounterObject)
             .subscribe((encounterResponse: any) => {
               if (encounterResponse && !encounterResponse?.error) {
-                const prescriptionOrders = items.map((item: any) => {
+                const prescriptionOrders = (
+                  items?.filter((item: any) => item?.drug) || []
+                ).map((item: any) => {
                   const prescriptionOrder = {
                     encounter: encounterResponse?.uuid,
                     orderType: "iCARESTS-PRES-1111-1111-525400e4297f",
@@ -356,35 +360,111 @@ export class CashierDashboardComponent implements OnInit {
                   };
                   return prescriptionOrder;
                 });
+                const nonDrugOrders = (
+                  items?.filter((item: any) => item?.drug) || []
+                ).map((item: any) => {
+                  const prescriptionOrder = {
+                    encounter: encounterResponse?.uuid,
+                    orderType: "OrdertypeUuid",
+                    concept: item?.concept?.uuid,
+                    action: "NEW",
+                    urgency: "ROUTINE",
+                    type: "orderTypeName",
+                    orderer: this.provider?.uuid,
+                    patient: this.patientUuid,
+                    orderReason: null,
+                    instructions:
+                      this.formData["instructions" + item?.itemUuid] &&
+                      this.formData["instructions" + item?.itemUuid]?.value
+                        ? this.formData["instructions" + item?.itemUuid]?.value
+                        : "",
+                    careSetting: "Outpatient",
+                    quantity: this.formData["quantity" + item?.itemUuid]?.value,
+                    quantityUnits: {
+                      uuid: "defaultQuantityUnit",
+                    },
+                    numRefills: 1,
+                    status: "EMPTY",
+                    remarks: "Control status",
+                    previousOrder: null,
+                    nonDrug: true,
+                  };
+                  return prescriptionOrder;
+                });
                 this.customForm$ = of(null);
 
                 this.currentLocation$ = of(null);
                 zip(
-                  ...prescriptionOrders?.map((prescriptionOrder: any) => {
-                    return this.drugOrderService
-                      .saveDrugOrder(prescriptionOrder)
-                      .pipe(
-                        map((response: any) => response),
-                        catchError((error: any) => of(error))
-                      );
-                  })
+                  ...[...prescriptionOrders, ...nonDrugOrders]?.map(
+                    (order: any) => {
+                      return !order?.isDrug
+                        ? this.drugOrderService.saveDrugOrder(order).pipe(
+                            map((response: any) => {
+                              return {
+                                ...response,
+                                isDrug: true,
+                              };
+                            }),
+                            catchError((error: any) => of(error))
+                          )
+                        : this.ordersService
+                            .createOrdersViaEncounter([
+                              {
+                                encounter: order?.encounter,
+                                concept: order?.concept,
+                                action: "NEW",
+                                orderType: order?.orderType,
+                                urgency: order?.urgency,
+                                type: order?.type,
+                                orderer: order.orderer,
+                                patient: order?.patient,
+                                careSetting: order?.careSetting,
+                                instructions: order?.instructions,
+                                orderReason: order?.orderReason,
+                              },
+                            ])
+                            .pipe(
+                              map((response: any) => {
+                                return {
+                                  ...response,
+                                  isDrug: false,
+                                };
+                              }),
+                              catchError((error: any) => of(error))
+                            );
+                    }
+                  )
                 ).subscribe((responses: any) => {
                   // console.log("responses", responses);
                   if (responses) {
                     // DIspense all (TODO: improve api to accommodate direct dispensing)
                     zip(
-                      ...responses.map((prescOrder: any) => {
-                        const dispendingDetails = {
-                          uuid: prescOrder?.uuid,
-                          location: currentLocation?.uuid,
-                          drug: {
-                            uuid: prescOrder?.drug?.uuid,
-                          },
-                          quantity: prescOrder?.quantity,
-                        };
-                        return this.drugOrderService.dispenseOrderedDrugOrder(
-                          dispendingDetails
-                        );
+                      ...flatten(responses).map((order: any) => {
+                        if (order?.isDrug) {
+                          const dispensingDetails = {
+                            uuid: order?.uuid,
+                            location: currentLocation?.uuid,
+                            drug: {
+                              uuid: order?.drug?.uuid,
+                            },
+                            quantity: order?.quantity,
+                          };
+                          return this.drugOrderService.dispenseOrderedDrugOrder(
+                            dispensingDetails
+                          );
+                        } else {
+                          const dispensingNonDrugDetails = {
+                            uuid: order?.uuid,
+                            location: currentLocation?.uuid,
+                            concept: {
+                              uuid: order?.concept?.uuid,
+                            },
+                            quantity: order?.quantity,
+                          };
+                          return this.drugOrderService.dispenseOrderedDrugOrder(
+                            dispensingNonDrugDetails
+                          );
+                        }
                       })
                     ).subscribe((dispenseResponses: any) => {
                       if (dispenseResponses) {
