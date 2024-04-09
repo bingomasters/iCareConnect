@@ -219,6 +219,7 @@ export class CashierDashboardComponent implements OnInit {
       this.createQuantityField(item?.itemUuid);
       this.createDoseInfoFields(item?.itemUuid);
       this.createSearchItemFormField();
+      console.log(this.selectedItems);
     }
   }
 
